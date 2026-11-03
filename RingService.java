@@ -20,13 +20,17 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
+import android.util.Log;
 
 public class RingService extends Service {
     public static final String ACT_STOP = "com.beacon.alarm.STOP";
     public static final String ACT_SNOOZE = "com.beacon.alarm.SNOOZE";
     public static final String BROADCAST_DONE = "com.beacon.alarm.DONE";
+    private static final String TAG = "BeaconRingService";
     private static final String CHANNEL = "ring";
+    private static final String MISSED_CHANNEL = "missed";
     private static final int NOTIF_ID = 42;
+    private static final int MISSED_NOTIF_BASE = 1000;
     private static final int SNOOZE_MINUTES = 5;
     private static final long MAX_RING_MS = 2 * 60 * 1000L;
 
@@ -99,9 +103,34 @@ public class RingService extends Service {
         h.postDelayed(new Runnable() {
             @Override
             public void run() {
+                // Nobody stopped or snoozed it: leave a trace so the alarm isn't lost silently.
+                postMissedNotification();
                 finishRing();
             }
         }, MAX_RING_MS);
+    }
+
+    private void postMissedNotification() {
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            nm.createNotificationChannel(new NotificationChannel(
+                    MISSED_CHANNEL, "Missed alarms", NotificationManager.IMPORTANCE_DEFAULT));
+            PendingIntent open = PendingIntent.getActivity(this, 4,
+                    new Intent(this, MainActivity.class),
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            String label = alarm.label == null || alarm.label.isEmpty() ? "" : " · " + alarm.label;
+            Notification n = new Notification.Builder(this, MISSED_CHANNEL)
+                    .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+                    .setContentTitle("Missed alarm")
+                    .setContentText(alarm.timeText() + label)
+                    .setCategory(Notification.CATEGORY_STATUS)
+                    .setAutoCancel(true)
+                    .setContentIntent(open)
+                    .build();
+            nm.notify(MISSED_NOTIF_BASE + alarm.id, n);
+        } catch (Exception e) {
+            Log.e(TAG, "Could not post missed-alarm notification", e);
+        }
     }
 
     private Notification buildNotification() {
@@ -135,28 +164,42 @@ public class RingService extends Service {
                 .build();
     }
 
+    /** Tries the default alarm sound, then falls back to notification and ringtone sounds. */
     private void playSound() {
-        try {
-            Uri u = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM);
-            if (u == null) u = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE);
-            player = new MediaPlayer();
-            player.setAudioAttributes(new AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ALARM)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build());
-            player.setDataSource(this, u);
-            player.setLooping(true);
-            player.prepare();
-            player.start();
-        } catch (Exception ignored) {
+        int[] types = {RingtoneManager.TYPE_ALARM, RingtoneManager.TYPE_NOTIFICATION,
+                RingtoneManager.TYPE_RINGTONE};
+        for (int type : types) {
+            Uri u = RingtoneManager.getDefaultUri(type);
+            if (u == null) continue;
+            MediaPlayer p = new MediaPlayer();
+            try {
+                p.setAudioAttributes(new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ALARM)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build());
+                p.setDataSource(this, u);
+                p.setLooping(true);
+                p.prepare();
+                p.start();
+                player = p;
+                return;
+            } catch (Exception e) {
+                Log.e(TAG, "Could not play sound " + u + "; trying next fallback", e);
+                try {
+                    p.release();
+                } catch (Exception ignored) {
+                }
+            }
         }
+        Log.e(TAG, "No alarm sound could be played; only vibration and light remain");
     }
 
     private void vibrate() {
         try {
             vib = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
             vib.vibrate(VibrationEffect.createWaveform(new long[]{0, 700, 500}, 0));
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            Log.e(TAG, "Could not vibrate", e);
         }
     }
 

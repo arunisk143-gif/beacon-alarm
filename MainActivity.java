@@ -472,7 +472,12 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        if (torch != null) torch.setListener(null);
+        if (torch != null) {
+            torch.setListener(null);
+            // Stop any flashing and unregister the torch callback; otherwise a flash
+            // sequence keeps running (forever when count = 0) after the screen is gone.
+            torch.release();
+        }
         super.onDestroy();
     }
 }
